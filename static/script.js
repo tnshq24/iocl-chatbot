@@ -2,11 +2,13 @@
 const endpoint = "https://iocl-hr-openai-service.openai.azure.com/";
 const deployment = "gpt-4o";
 const subscriptionKey = "9f82a1e82c7444e8a8453f9d7f787e2a"; // Your actual API key
- 
+
 // Search Service Variables
 const searchEndpoint = "https://ioclhrbotlanguageservice-as4opiftbiczhpi.search.windows.net";
 const searchKey = "KdAi5bqgwcJcIW1wLhD3DbanfpxoghPuU1wtzUGxmZAzSeD9rKzi";
 const searchIndex = "iocl-idx";
+
+// Function to call the Chatbot API with PDF search integration
 async function callChatbotAPI(message) {
     const url = `${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-02-15-preview`;
 
@@ -14,12 +16,11 @@ async function callChatbotAPI(message) {
         "Content-Type": "application/json",
         "api-key": subscriptionKey
     };
-
     const body = {
         "messages": [
             {
                 "role": "system",
-                "content": "You are an AI assistant that helps people find information."
+                "content": "You are an AI assistant that helps people find information in documents. When answering, you must include the page number and line number from the document in this format: (document.pdf, p. X, lines A-Y)."
             },
             {
                 "role": "user",
@@ -29,35 +30,37 @@ async function callChatbotAPI(message) {
         "max_tokens": 800,
         "temperature": 0.7,
         "top_p": 0.95,
-        "frequency_penalty": 0,
-        "presence_penalty": 0,
         "data_sources": [
             {
                 "type": "azure_search",
                 "parameters": {
-                    "endpoint": searchEndpoint,
-                    "index_name": searchIndex,
+                    "endpoint": searchEndpoint,   // Search service endpoint
+                    "index_name": searchIndex,    // The name of the index where the PDF is stored
                     "semantic_configuration": "default",
-                    "query_type": "vector_simple_hybrid",
-                    "fields_mapping": {},
+                    "query_type": "vector_simple_hybrid",  // Type of query to retrieve relevant information
+                    "fields_mapping": {
+                        "content": "pdf_text",   // Field where PDF content is indexed
+                        "page_number": "pdf_page",  // Field for page number
+                        "line_number": "pdf_line"   // Field for line number
+                    },
                     "in_scope": true,
-                    "role_information": "You are an AI assistant that helps users find information in documents. When answering, include the page number and line number from the document which ***must* have the exact reference of the response in the document and page number and line number **must** be only in this format e.g.: '(hrhbtb.pdf, p. X, lines A-Y)' name 'hrhbtb.pdf'. Also, provide a reference link to the 'hrhbtb.pdf' document in the response.",
-                    "filter": null,
-                    "strictness": 4,
-                    "top_n_documents": 3,
+                    "role_information": "You are an AI assistant that helps users find information in documents. When answering, always include the page number and line number from the document using this format: (document_name.pdf, p. X, lines A-Y).",
+                    "filter": null,   // Optional filter if you want to narrow search results
+                    "strictness": 4,  // Increase strictness for precise answers
+                    "top_n_documents": 3,  // Number of top documents to return
                     "authentication": {
                         "type": "api_key",
-                        "key": searchKey
+                        "key": searchKey   // The API key for accessing Azure Cognitive Search
                     },
                     "embedding_dependency": {
                         "type": "deployment_name",
-                        "deployment_name": "iocl-ada"
+                        "deployment_name": "iocl-ada"  // Replace with actual embedding deployment name
                     }
                 }
             }
         ]
     };
-
+    
     try {
         const response = await fetch(url, {
             method: 'POST',
@@ -67,8 +70,7 @@ async function callChatbotAPI(message) {
 
         if (response.ok) {
             const jsonResponse = await response.json();
-            console.log("Received response:", jsonResponse);
-            return jsonResponse.choices[0].message.content; // Extracting the message content
+            return jsonResponse.choices[0].message.content;
         } else {
             console.error('Error response from API:', response.status, response.statusText);
             return 'Error retrieving a response. Please try again later.';
@@ -78,34 +80,51 @@ async function callChatbotAPI(message) {
         return 'Error retrieving a response. Please check your connection and try again later.';
     }
 }
+const regex = /\(.*\.pdf, p\. (\d+), lines (\d+)-(\d+)\)/;
+const match = chatbotResponse.match(regex);
+if (match) {
+    const pageNumber = parseInt(match[1]);
+    const startLine = parseInt(match[2]);
+    const endLine = parseInt(match[3]);
 
+    // Call function to open PDF at the exact page and highlight lines
+    openPDFAtPageAndHighlight(pageNumber, startLine, endLine);
+}
 async function sendMessage() {
     const inputField = document.getElementById('chat-input');
     const message = inputField.value.trim();
 
     if (message === '') return;
 
-    addMessageToChat('You', message);
+    addMessageToChat('You:', message, true);
     inputField.value = '';
 
     const chatbotResponse = await callChatbotAPI(message);
     let responseWithLink = chatbotResponse;
-    if (chatbotResponse.toLowerCase().includes('pdf')) {
+    if (chatbotResponse.trim() !== '') {
         const encodedText = encodeURIComponent(chatbotResponse); 
-        responseWithLink += `<br><a href="/view-pdf?response=${encodedText}" target="_blank" style="color: blue; text-decoration: underline;">View in PDF</a>`;
-    }
-     else {
+        responseWithLink += `<br><a href="/view-pdf?response=${encodedText}" target="_blank" style="color: blue; text-decoration: underline;">View in PDF</a>`;         
+    }else {
         responseWithLink += `<br><small style="color: grey;">Generated by AI.</small>`;
     }
 
-    addMessageToChat('IOCL Bot', responseWithLink);
+    addMessageToChat('IOCL Bot:', responseWithLink, false);
 }
 
 // Function to add a message to the chat window
-function addMessageToChat(sender, message) {
+function addMessageToChat(sender, message, isUser) {
     const messagesContainer = document.getElementById('chatbot-messages');
     const messageElement = document.createElement('div');
-    messageElement.innerHTML = `${sender}: ${message}`;
+    messageElement.style.marginBottom = '15px';
+
+    if (isUser) {
+        messageElement.innerHTML = `<span class="user-highlight">${sender}</span> <span class="message-highlight">${message}</span>`;
+        messageElement.style.textAlign = 'right';
+    } else {
+        messageElement.innerHTML = `<span class="chatbot-highlight">${sender}</span> <span class="message-highlight">${message}</span>`;
+        messageElement.style.textAlign = 'left';
+    }
+
     messagesContainer.appendChild(messageElement);
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
@@ -123,6 +142,74 @@ function toggleChatbot() {
         chatbotWindow.style.display = 'flex';
         chatbotWindow.classList.add('active');
         chatbotWindow.style.animation = 'fadeIn 0.3s ease-out';
-        addMessageToChat('IOCL Bot', 'Hello, how may I assist you?');
+        addMessageToChat('IOCL Bot:', 'Hello, how may I assist you?', false);
     }
+}
+const urlParams = new URLSearchParams(window.location.search);
+const response = decodeURIComponent(urlParams.get('response'));
+
+// Load PDF and highlight text using PDF.js
+pdfjsLib.getDocument('path/to/your.pdf').promise.then(function(pdf) {
+    pdf.getPage(1).then(function(page) {
+        var viewport = page.getViewport({ scale: 1.5 });
+        var canvas = document.getElementById('pdf-canvas');
+        var context = canvas.getContext('2d');
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+
+        // Render the page
+        page.render({ canvasContext: context, viewport: viewport }).promise.then(function() {
+            
+            // Now search and highlight the text
+            highlightText(response, page, viewport);
+        });
+    });
+});
+
+function highlightText(text, page, viewport) {
+    // You will need to search for the text and then highlight it
+    page.getTextContent().then(function(textContent) {
+        textContent.items.forEach(function(item) {
+            if (item.str.includes(text)) {
+                var bounds = item.transform;
+                context.beginPath();
+                context.rect(bounds[4], bounds[5] - 10, item.width, 10); // Adjust height based on text size
+                context.fillStyle = 'yellow';
+                context.fill();
+            }
+        });
+    });
+}
+function openPDFAtPageAndHighlight(pageNumber, startLine, endLine) {
+    pdfjsLib.getDocument('path/to/your.pdf').promise.then(function(pdf) {
+        pdf.getPage(pageNumber).then(function(page) {
+            var viewport = page.getViewport({ scale: 1.5 });
+            var canvas = document.getElementById('pdf-canvas');
+            var context = canvas.getContext('2d');
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            // Render the page
+            page.render({ canvasContext: context, viewport: viewport }).promise.then(function() {
+                // Highlight lines
+                highlightLinesInPDF(page, startLine, endLine, viewport, context);
+            });
+        });
+    });
+}
+
+function highlightLinesInPDF(page, startLine, endLine, viewport, context) {
+    // Get the text content of the page
+    page.getTextContent().then(function(textContent) {
+        textContent.items.forEach(function(item, index) {
+            // Assuming each item represents a line of text
+            if (index >= startLine && index <= endLine) {
+                var bounds = item.transform;
+                context.beginPath();
+                context.rect(bounds[4], bounds[5] - 10, item.width, 10); // Adjust height and width based on text size
+                context.fillStyle = 'yellow';
+                context.fill();
+            }
+        });
+    });
 }
