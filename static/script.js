@@ -2,13 +2,11 @@
 const endpoint = "https://iocl-hr-openai-service.openai.azure.com/";
 const deployment = "gpt-4o";
 const subscriptionKey = "9f82a1e82c7444e8a8453f9d7f787e2a"; // Your actual API key
-
+ 
 // Search Service Variables
 const searchEndpoint = "https://ioclhrbotlanguageservice-as4opiftbiczhpi.search.windows.net";
 const searchKey = "KdAi5bqgwcJcIW1wLhD3DbanfpxoghPuU1wtzUGxmZAzSeD9rKzi";
-const searchIndex = "iocl-idx";
-
-// Function to call the Chatbot API with PDF search integration
+const searchIndex = "iocl-pages-idx";
 async function callChatbotAPI(message) {
     const url = `${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-02-15-preview`;
 
@@ -16,11 +14,12 @@ async function callChatbotAPI(message) {
         "Content-Type": "application/json",
         "api-key": subscriptionKey
     };
+
     const body = {
         "messages": [
             {
                 "role": "system",
-                "content": "You are an AI assistant that helps people find information in documents. When answering, you must include the page number and line number from the document in this format: (document.pdf, p. X, lines A-Y)."
+                "content": "All responses must be formatted as follows: The response should provide clear and concise information relevant to the query. Always include the following reference link at the end of each response: https://ioclhrchatgpt.blob.core.windows.net/documents/hrhbtb.pdf"
             },
             {
                 "role": "user",
@@ -30,37 +29,35 @@ async function callChatbotAPI(message) {
         "max_tokens": 800,
         "temperature": 0.7,
         "top_p": 0.95,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
         "data_sources": [
             {
                 "type": "azure_search",
                 "parameters": {
-                    "endpoint": searchEndpoint,   // Search service endpoint
-                    "index_name": searchIndex,    // The name of the index where the PDF is stored
+                    "endpoint": searchEndpoint,
+                    "index_name": searchIndex,
                     "semantic_configuration": "default",
-                    "query_type": "vector_simple_hybrid",  // Type of query to retrieve relevant information
-                    "fields_mapping": {
-                        "content": "pdf_text",   // Field where PDF content is indexed
-                        "page_number": "pdf_page",  // Field for page number
-                        "line_number": "pdf_line"   // Field for line number
-                    },
+                    "query_type": "vector_simple_hybrid",
+                    "fields_mapping": {},
                     "in_scope": true,
-                    "role_information": "You are an AI assistant that helps users find information in documents. When answering, always include the page number and line number from the document using this format: (document_name.pdf, p. X, lines A-Y).",
-                    "filter": null,   // Optional filter if you want to narrow search results
-                    "strictness": 4,  // Increase strictness for precise answers
-                    "top_n_documents": 3,  // Number of top documents to return
+                    "role_information": "All responses must be formatted as follows: The response should provide clear and concise information relevant to the query. Always include the following reference link at the end of each response: https://ioclhrchatgpt.blob.core.windows.net/documents/hrhbtb.pdf",
+                    "filter": null,
+                    "strictness": 4,
+                    "top_n_documents": 3,
                     "authentication": {
                         "type": "api_key",
-                        "key": searchKey   // The API key for accessing Azure Cognitive Search
+                        "key": searchKey
                     },
                     "embedding_dependency": {
                         "type": "deployment_name",
-                        "deployment_name": "iocl-ada"  // Replace with actual embedding deployment name
+                        "deployment_name": "iocl-ada"
                     }
                 }
             }
         ]
     };
-    
+
     try {
         const response = await fetch(url, {
             method: 'POST',
@@ -80,136 +77,58 @@ async function callChatbotAPI(message) {
         return 'Error retrieving a response. Please check your connection and try again later.';
     }
 }
-const regex = /\(.*\.pdf, p\. (\d+), lines (\d+)-(\d+)\)/;
-const match = chatbotResponse.match(regex);
-if (match) {
-    const pageNumber = parseInt(match[1]);
-    const startLine = parseInt(match[2]);
-    const endLine = parseInt(match[3]);
 
-    // Call function to open PDF at the exact page and highlight lines
-    openPDFAtPageAndHighlight(pageNumber, startLine, endLine);
-}
+// Function to send a message from the user and display the chatbot response
 async function sendMessage() {
     const inputField = document.getElementById('chat-input');
     const message = inputField.value.trim();
 
     if (message === '') return;
 
+    // Add user's message to chat with "You: " prefix and bold formatting
     addMessageToChat('You:', message, true);
     inputField.value = '';
 
+    // Get chatbot response
     const chatbotResponse = await callChatbotAPI(message);
     let responseWithLink = chatbotResponse;
-    if (chatbotResponse.trim() !== '') {
+
+    // If the response contains 'pdf', add a 'View in PDF' link
+    if (chatbotResponse.toLowerCase().includes('pdf')) {
         const encodedText = encodeURIComponent(chatbotResponse); 
-        responseWithLink += `<br><a href="/view-pdf?response=${encodedText}" target="_blank" style="color: blue; text-decoration: underline;">View in PDF</a>`;         
-    }else {
+        responseWithLink += `<br><a href="/view-pdf?response=${encodedText}" target="_blank" style="color: blue; text-decoration: underline;">View in PDF</a>`;
+    } else {
         responseWithLink += `<br><small style="color: grey;">Generated by AI.</small>`;
     }
 
-    addMessageToChat('IOCL Bot:', responseWithLink, false);
+    // Add chatbot's response to the chat with "Chatbot: " prefix
+    addMessageToChat('Chatbot:', responseWithLink, false);
 }
 
 // Function to add a message to the chat window
+// 'isUser' parameter determines if the message is from the user (for alignment and bolding)
 function addMessageToChat(sender, message, isUser) {
     const messagesContainer = document.getElementById('chatbot-messages');
     const messageElement = document.createElement('div');
+
+    // Apply spacing between the previous message and the new one
     messageElement.style.marginBottom = '15px';
 
+    // Format message text (highlight for user and chatbot with light green background)
     if (isUser) {
         messageElement.innerHTML = `<span class="user-highlight">${sender}</span> <span class="message-highlight">${message}</span>`;
-        messageElement.style.textAlign = 'right';
+        messageElement.style.textAlign = 'right'; // Align user's message to the right
     } else {
         messageElement.innerHTML = `<span class="chatbot-highlight">${sender}</span> <span class="message-highlight">${message}</span>`;
-        messageElement.style.textAlign = 'left';
+        messageElement.style.textAlign = 'left'; // Align chatbot's message to the left
     }
 
     messagesContainer.appendChild(messageElement);
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
-
-// Function to toggle the chatbot window
-function toggleChatbot() {
-    const chatbotWindow = document.getElementById('chatbot-window');
-    if (chatbotWindow.classList.contains('active')) {
-        chatbotWindow.classList.remove('active');
-        chatbotWindow.style.animation = 'fadeOut 0.3s ease-out';
-        setTimeout(() => {
-            chatbotWindow.style.display = 'none';
-        }, 300);
-    } else {
-        chatbotWindow.style.display = 'flex';
-        chatbotWindow.classList.add('active');
-        chatbotWindow.style.animation = 'fadeIn 0.3s ease-out';
-        addMessageToChat('IOCL Bot:', 'Hello, how may I assist you?', false);
-    }
-}
-const urlParams = new URLSearchParams(window.location.search);
-const response = decodeURIComponent(urlParams.get('response'));
-
-// Load PDF and highlight text using PDF.js
-pdfjsLib.getDocument('path/to/your.pdf').promise.then(function(pdf) {
-    pdf.getPage(1).then(function(page) {
-        var viewport = page.getViewport({ scale: 1.5 });
-        var canvas = document.getElementById('pdf-canvas');
-        var context = canvas.getContext('2d');
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
-
-        // Render the page
-        page.render({ canvasContext: context, viewport: viewport }).promise.then(function() {
-            
-            // Now search and highlight the text
-            highlightText(response, page, viewport);
-        });
-    });
+// Add event listener to the "New Chat" button
+document.getElementById('new-chat-btn').addEventListener('click', () => {
+    const messagesContainer = document.getElementById('chatbot-messages');
+    messagesContainer.innerHTML = ''; // Clear the chat window
+    addMessageToChat('Chatbot:', 'Hello, how may I assist you?', false);
 });
-
-function highlightText(text, page, viewport) {
-    // You will need to search for the text and then highlight it
-    page.getTextContent().then(function(textContent) {
-        textContent.items.forEach(function(item) {
-            if (item.str.includes(text)) {
-                var bounds = item.transform;
-                context.beginPath();
-                context.rect(bounds[4], bounds[5] - 10, item.width, 10); // Adjust height based on text size
-                context.fillStyle = 'yellow';
-                context.fill();
-            }
-        });
-    });
-}
-function openPDFAtPageAndHighlight(pageNumber, startLine, endLine) {
-    pdfjsLib.getDocument('path/to/your.pdf').promise.then(function(pdf) {
-        pdf.getPage(pageNumber).then(function(page) {
-            var viewport = page.getViewport({ scale: 1.5 });
-            var canvas = document.getElementById('pdf-canvas');
-            var context = canvas.getContext('2d');
-            canvas.height = viewport.height;
-            canvas.width = viewport.width;
-
-            // Render the page
-            page.render({ canvasContext: context, viewport: viewport }).promise.then(function() {
-                // Highlight lines
-                highlightLinesInPDF(page, startLine, endLine, viewport, context);
-            });
-        });
-    });
-}
-
-function highlightLinesInPDF(page, startLine, endLine, viewport, context) {
-    // Get the text content of the page
-    page.getTextContent().then(function(textContent) {
-        textContent.items.forEach(function(item, index) {
-            // Assuming each item represents a line of text
-            if (index >= startLine && index <= endLine) {
-                var bounds = item.transform;
-                context.beginPath();
-                context.rect(bounds[4], bounds[5] - 10, item.width, 10); // Adjust height and width based on text size
-                context.fillStyle = 'yellow';
-                context.fill();
-            }
-        });
-    });
-}
