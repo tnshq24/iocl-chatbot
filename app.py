@@ -1,48 +1,72 @@
+import fitz  # PyMuPDF
 import re
-from flask import Flask, render_template, request, send_file, jsonify
-from io import BytesIO
-from pdfminer.high_level import extract_pages
-from pdfminer.layout import LTTextContainer, LTTextLine
-from pypdf import PdfReader, PdfWriter
-from pypdf.generic import (ArrayObject, DictionaryObject, FloatObject, NameObject, 
-                           NumberObject, TextStringObject)
 import requests
+from io import BytesIO
+from flask import Flask, render_template, request, send_file
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import ArrayObject, DictionaryObject, FloatObject, NameObject, NumberObject
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import nltk
+from nltk.tokenize import sent_tokenize
+
+nltk.data.path.append('/root/nltk_data')  # Add this line to specify the NLTK data path
+nltk.download('punkt', download_dir='/root/nltk_data')  # Download punkt to the specified directory
 
 app = Flask(__name__)
 
-# Fetch PDF from external URL
+# URL to PDF file
 PDF_URL = "https://ioclhrchatgpt.blob.core.windows.net/documents/hrhbtb.pdf"
 
-def is_within_bbox(bbox: list[float], constraint_bbox: list[float], margin=10):
-    x0, y0, x1, y1 = bbox
-    cx0, cy0, cx1, cy1 = constraint_bbox
-    return cx0 <= x0 + margin and cy0 <= y0 + margin and cx1 >= x1 - margin and cy1 >= y1 - margin
+# Text cleaning function
+def clean_text(text):
+    return re.sub(r'\s+', ' ', re.sub(r'[•\n]', ' ', text)).strip()
 
-def extract_line_bboxes(page_layout, target_line_number):
-    """Extract bounding boxes of text lines on a page."""
-    line_bboxes = []
-    current_line_number = 0
+def extract_page_numbers(chatbot_response):
+    """
+    Extracts page numbers from references of the format 'hrhbtb-page-X.pdf'.
+
+    Args:
+    - chatbot_response (str): The response text from the chatbot.
+
+    Returns:
+    - list: A list of extracted page numbers.
+    """
+    # Regular expression to match page references in the format hrhbtb-page-X.pdf
+    pattern = r'hrhbtb-page-(\d+)\.pdf'
     
-    for element in page_layout:
-        if isinstance(element, LTTextContainer):
-            for text_line in element:
-                if isinstance(text_line, LTTextLine):
-                    current_line_number += 1
-                    if current_line_number == target_line_number:
-                        line_bbox = list(text_line.bbox)
-                        line_bboxes.append(line_bbox)
-                        break
-    return line_bboxes
+    # Find all matches
+    matches = re.findall(pattern, chatbot_response)
+    
+    return list(set(map(int, matches)))  # Convert to int and return unique page numbers
 
-def highlight_annotation(bounds: list[list[float]], color=[1, 1, 0]):
+# Extract sentences from PDF
+def extract_sentences_from_pdf(pdf_content):
+    sentences = []
+    pdf = fitz.open(stream=pdf_content, filetype="pdf")
+    for page_num in range(len(pdf)):
+        page = pdf[page_num]
+        text = clean_text(page.get_text("text"))
+        sentences.extend(sent_tokenize(text))
+    return sentences
+
+# Find most similar sentence
+def find_most_similar_sentence(chatbot_response, pdf_sentences):
+    documents = [chatbot_response] + pdf_sentences
+    vectorizer = TfidfVectorizer()
+    tfidf_matrix = vectorizer.fit_transform(documents)
+    similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
+    best_match_index = similarities.argmax()
+    return pdf_sentences[best_match_index], similarities[best_match_index]
+
+# Create a highlight annotation
+def highlight_annotation(bounds, color=[1, 1, 0]):
     x0, y0, x1, y1 = [list(sub_list) for sub_list in zip(*bounds)]
     rect_bbox = [min(x0), min(y0), max(x1), max(y1)]
-
     quad_points = []
     for bbox in bounds:
         x1, y1, x2, y2 = bbox
         quad_points.extend([x1, y2, x2, y2, x1, y1, x2, y1])
-
     return DictionaryObject({
         NameObject("/F"): NumberObject(4),
         NameObject("/Type"): NameObject("/Annot"),
@@ -52,92 +76,60 @@ def highlight_annotation(bounds: list[list[float]], color=[1, 1, 0]):
         NameObject("/QuadPoints"): ArrayObject([FloatObject(c) for c in quad_points]),
     })
 
-import re
+# Highlight similar text in PDF
+def highlight_text_in_page(page, search_text):
+    rects = page.search_for(search_text)
+    p1 = rects[0].tl  # top-left point of first rectangle
+    p2 = rects[-1].br  # bottom-right point of last rectangle
 
-def extract_lines(text):
-    """
-    Extracts the page number and lines in the specified range from the chatbot response.
-    The format to match is (hrhbtb.pdf, p. X, lines Y-Z).
-    """
-    pattern = r'\(hrhbtb\.pdf, p\. (\d+), lines (\d+)-(\d+)\)'
-    
-    # Find all matches in the text
-    matches = re.findall(pattern, text)
-    
-    # Process and return the results as a list of tuples
-    result = []
-    for match in matches:
-        page_number = int(match[0])
-        start_line = int(match[1])
-        end_line = int(match[2])
-        # Create tuples for each line in the range
-        for line in range(start_line, end_line + 1):
-            result.append((page_number, line))
-
-    
-    return result
-
-@app.route('/process-response', methods=['POST'])
-def process_response():
-    data = request.get_json()
-    chatbot_response = data.get('response')
-
-    if chatbot_response:
-        extracted_lines = extract_lines(chatbot_response)
-        return jsonify(extracted_lines)
-    else:
-        return jsonify([]), 400
-
+    # mark text that potentially extends across multiple lines
+    page.add_highlight_annot(start=p1, stop=p2)
 
 @app.route('/view-pdf')
 def view_pdf():
-    # Fetch PDF file from the external URL
+    # Fetch PDF content
     response = requests.get(PDF_URL)
     if response.status_code != 200:
         return "Unable to fetch the PDF.", 500
 
     pdf_content = BytesIO(response.content)
+    chatbot_response = request.args.get('response', '').strip()
+    pages = extract_page_numbers(chatbot_response)
 
-    # Get the chatbot response passed as a query parameter
-    chatbot_response = request.args.get('response', '')
 
-    # Ensure the chatbot response contains relevant PDF references
     if not chatbot_response:
-        return "No chatbot response provided."
+        return "No chatbot response provided.", 400
 
-    # Extract page and line pairs from the chatbot response
-    page_line_pairs = extract_lines(chatbot_response)  # Extract lines dynamically
-
-    if not page_line_pairs:
-        return "No lines to highlight.", 400
+    # Extract sentences from the PDF
+    pdf_sentences = extract_sentences_from_pdf(pdf_content.getvalue())
+    # Find the most similar sentence to the chatbot response
+    most_similar_sentence, similarity_score = find_most_similar_sentence(chatbot_response, pdf_sentences)
+    print(most_similar_sentence)
+    if similarity_score < 0.1:
+        return "No highly similar sentence found.", 400
 
     try:
-        # Open the PDF from fetched content
-        reader = PdfReader(pdf_content)
-        writer = PdfWriter()
+        # Use fitz to process pages for highlighting
+        pdf_fitz = fitz.open(stream=pdf_content.getvalue(), filetype="pdf")
 
-        # Iterate through all the pages in the document
-        for page_num, page in enumerate(reader.pages, start=1):
-            page_layout = list(extract_pages(pdf_content))[page_num - 1]
+        # Process specified pages to highlight the found sentence
+        for page_num in range(len(pdf_fitz)):  # Ensure page number is valid (use <= for 1-based indexing)
+            pdf_page = pdf_fitz[page_num]  # Get the specific page
+            print(len(pdf_fitz))
+            print('page_num', page_num)
+            # Attempt to highlight the text on the current page
+            rects = pdf_page.search_for(most_similar_sentence)  # Search for the text on the current page
+            print('rects',rects)
+            if rects:  # If rectangles are found, highlight them
+                highlight_text_in_page(pdf_page, most_similar_sentence)
+                break  # Exit the loop after highlighting the first found instance
 
-            lines_to_highlight = [line_num for (p, line_num) in page_line_pairs if p == page_num]
 
-            if lines_to_highlight:
-                for line_number in lines_to_highlight:
-                    line_bboxes = extract_line_bboxes(page_layout, line_number)
-                    if line_bboxes:
-                        highlight = highlight_annotation(line_bboxes)
-                        if "/Annots" in page:
-                            page["/Annots"].append(highlight)
-                        else:
-                            page[NameObject("/Annots")] = ArrayObject([highlight])
-
-            writer.add_page(page)
-
-        # Save the highlighted PDF to a BytesIO object
+        # Save the modified PDF document
         output_stream = BytesIO()
-        writer.write(output_stream)
-        output_stream.seek(0)
+        pdf_fitz.save(output_stream)  # Save the modified PDF into the output stream
+        pdf_fitz.close()  # Close the document
+        output_stream.seek(0)  # Reset stream position to the start
 
         return send_file(
             output_stream,
@@ -148,10 +140,10 @@ def view_pdf():
 
     except Exception as e:
         return f"An error occurred: {str(e)}", 500
+
 @app.route('/')
 def index():
     return render_template('index.html')
-
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001)
